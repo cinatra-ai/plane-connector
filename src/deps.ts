@@ -13,8 +13,13 @@ import "server-only";
 //     `@cinatra-ai/host:secrets-codec` capability that wordpress/drupal/twenty
 //     use for their API keys.
 //   - configStore: read/write the connector_config row holding the encrypted
-//     PAT + the chosen workspace slug + project id + base URL, and the
-//     runId→taskId mapping rows.
+//     PAT + the chosen workspace slug + project id + base URL.
+//
+// NOTE (merged PmConnector contract, #366): the connector NO LONGER keeps a
+// runId→taskId mapping. The HOST owns the runId<->externalTaskId link table
+// (pm-link) — it passes `existingTaskId` into `upsertTriggerTask` and persists
+// the returned `PmTaskRef.externalTaskId`. So these deps cover ONLY the instance
+// config + the secrets codec; there is no run-task mapping member.
 //
 // The deps slot is anchored on `globalThis` via a namespaced+versioned Symbol
 // so the boot-time registration and the runtime callers — which live in
@@ -59,12 +64,6 @@ export interface PlaneConnectorHostDeps {
   loadInstanceConfig: () => Promise<PlaneInstanceConfig | null>;
   /** Persist (upsert) the Plane instance config (encrypted PAT included). */
   saveInstanceConfig: (config: PlaneInstanceConfig) => Promise<void>;
-  /** Read the mapped Plane work-item id for a cinatra run id (null = unmapped). */
-  loadRunTaskId: (runId: string) => Promise<string | null>;
-  /** Upsert the runId→taskId mapping. */
-  saveRunTaskId: (runId: string, taskId: string) => Promise<void>;
-  /** Delete the runId→taskId mapping (idempotent). */
-  deleteRunTaskId: (runId: string) => Promise<void>;
 }
 
 const PLANE_DEPS_KEY = Symbol.for("@cinatra-ai/plane-connector:host-deps/v1");

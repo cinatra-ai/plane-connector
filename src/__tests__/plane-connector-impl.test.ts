@@ -1,10 +1,16 @@
-// plane-connector impl tests — exercise the PmConnector verbs against a mocked
-// fetch, asserting the SMOKE-PROVEN contract:
+// plane-connector impl tests — exercise the merged PmConnector contract (#366)
+// against a mocked fetch, asserting the SMOKE-PROVEN wire facts:
+//   - upsertTriggerTask({ task, existingTaskId }) -> PmTaskRef
+//   - deleteTriggerTask({ runId, externalTaskId }) -> void
 //   - X-API-Key is the SOLE auth header sent (never Authorization: Bearer).
 //   - work-item CRUD scopes to /workspaces/{slug}/projects/{projectId}/work-items/.
 //   - dates use start_date/target_date (never due_date), and a SILENTLY DROPPED
 //     target_date is surfaced as a loud error (the due_date trap).
-//   - lock-free duplicate reconcile converges concurrent creates onto one survivor.
+//   - NATURAL-KEY IDEMPOTENCY: a null-id upsert finds an existing item by the
+//     `[cinatra:<runId>]` marker (find-or-create), never blind-creating a
+//     duplicate; concurrent first-creates converge on one survivor.
+//   - the HOST owns the runId<->externalTaskId link — the connector keeps NO
+//     local mapping (existingTaskId is passed IN; PmTaskRef is returned).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { planeConnector } from "../plane-connector";
 import {
@@ -25,7 +31,8 @@ const INSTANCE: PlaneInstanceConfig = {
 
 const PAT_PLAINTEXT = "plane_api_smoke_test_token";
 
-let taskMap: Map<string, string>;
+const PROJECT_BASE =
+  "http://127.0.0.1:3400/api/v1/workspaces/cinatra-smoke/projects/9e051c95-7408-4d4e-896e-c714e02e5713";
 
 function buildDeps(): PlaneConnectorHostDeps {
   return {
@@ -35,20 +42,12 @@ function buildDeps(): PlaneConnectorHostDeps {
     },
     loadInstanceConfig: async () => INSTANCE,
     saveInstanceConfig: async () => {},
-    loadRunTaskId: async (runId) => taskMap.get(runId) ?? null,
-    saveRunTaskId: async (runId, taskId) => {
-      taskMap.set(runId, taskId);
-    },
-    deleteRunTaskId: async (runId) => {
-      taskMap.delete(runId);
-    },
   };
 }
 
 const fetchMock = vi.fn();
 
 beforeEach(() => {
-  taskMap = new Map();
   registerPlaneConnector(buildDeps());
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
@@ -66,10 +65,21 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-describe("planeConnector — auth + work-item CRUD (smoke-proven)", () => {
-  it("upsertRunTask CREATE sends X-API-Key only, scopes the URL, uses start_date/target_date, embeds the runId marker", async () => {
+const TASK = {
+  runId: "r1",
+  triggerType: "scheduled" as const,
+  scheduledAt: "2026-06-20T09:00:00.000Z" as string | null,
+  cronExpression: null as string | null,
+  timezone: "UTC",
+  enabled: true,
+};
+
+describe("planeConnector — merged PmConnector contract + smoke-proven wire", () => {
+  it("upsertTriggerTask first push (null id) find-or-creates: GET-by-marker miss → CREATE, X-API-Key only, scoped URL, start_date/target_date, marker, returns PmTaskRef", async () => {
     fetchMock
-      // 1) CREATE -> 201
+      // 1) find-by-marker LIST -> no existing item for this runId
+      .mockResolvedValueOnce(jsonResponse(200, { results: [] }))
+      // 2) CREATE -> 201
       .mockResolvedValueOnce(
         jsonResponse(201, {
           id: "wi-1",
@@ -79,27 +89,31 @@ describe("planeConnector — auth + work-item CRUD (smoke-proven)", () => {
           state: "backlog",
         }),
       )
-      // 2) reconcile LIST -> only our own item (no duplicate)
+      // 3) reconcile LIST -> only our own item (no duplicate)
       .mockResolvedValueOnce(
         jsonResponse(200, { results: [{ id: "wi-1", name: "cinatra run r1 [cinatra:r1]" }] }),
       );
 
-    const task = await planeConnector.upsertRunTask({
-      runId: "r1",
-      triggerType: "scheduled",
-      scheduledAt: "2026-06-20T09:00:00.000Z",
-      timezone: "UTC",
-      enabled: true,
+    const ref = await planeConnector.upsertTriggerTask({
+      task: { ...TASK },
+      existingTaskId: null,
     });
 
-    expect(task.id).toBe("wi-1");
-    expect(task.dueDate).toBe("2026-06-20");
+    // Returns the PmTaskRef the host persists in the pm-link row.
+    expect(ref.externalTaskId).toBe("wi-1");
+    expect(ref.providerId).toBe("plane");
 
-    // Inspect the CREATE request.
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(
-      "http://127.0.0.1:3400/api/v1/workspaces/cinatra-smoke/projects/9e051c95-7408-4d4e-896e-c714e02e5713/work-items/",
-    );
+    // 1st fetch is the find-by-marker LIST (GET, search marker).
+    {
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(init.method ?? "GET").toBe("GET");
+      expect(url).toContain(`${PROJECT_BASE}/work-items/?search=`);
+      expect(decodeURIComponent(url)).toContain("[cinatra:r1]");
+    }
+
+    // 2nd fetch is the CREATE.
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe(`${PROJECT_BASE}/work-items/`);
     expect(init.method).toBe("POST");
     // SOLE authenticator — X-API-Key present, NO Authorization header.
     const headers = init.headers as Record<string, string>;
@@ -112,12 +126,9 @@ describe("planeConnector — auth + work-item CRUD (smoke-proven)", () => {
     expect(sentBody.target_date).toBe("2026-06-20");
     expect("due_date" in sentBody).toBe(false);
     expect(sentBody.name).toContain("[cinatra:r1]");
-    // The runId→taskId mapping was persisted.
-    expect(taskMap.get("r1")).toBe("wi-1");
   });
 
-  it("upsertRunTask UPDATE PATCHes the existing work item when a mapping exists (no reconcile)", async () => {
-    taskMap.set("r1", "wi-1");
+  it("upsertTriggerTask with an existingTaskId PATCHes that item directly (no find-by-marker, no reconcile)", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         id: "wi-1",
@@ -126,90 +137,147 @@ describe("planeConnector — auth + work-item CRUD (smoke-proven)", () => {
       }),
     );
 
-    const task = await planeConnector.upsertRunTask({
-      runId: "r1",
-      triggerType: "scheduled",
-      scheduledAt: "2026-06-25T09:00:00.000Z",
-      timezone: "UTC",
+    const ref = await planeConnector.upsertTriggerTask({
+      task: { ...TASK, scheduledAt: "2026-06-25T09:00:00.000Z" },
+      existingTaskId: "wi-1",
     });
 
-    expect(task.dueDate).toBe("2026-06-25");
+    expect(ref.externalTaskId).toBe("wi-1");
+    expect(ref.providerId).toBe("plane");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toContain("/work-items/wi-1/");
+    expect(url).toBe(`${PROJECT_BASE}/work-items/wi-1/`);
     expect(init.method).toBe("PATCH");
-    // UPDATE path makes exactly one call — no reconcile LIST.
+    // UPDATE path makes exactly one call — no find-by-marker, no reconcile LIST.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("LOUDLY fails when Plane silently drops target_date (the due_date trap)", async () => {
-    // 201 but target_date comes back null — fail BEFORE the reconcile.
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(201, { id: "wi-2", name: "x [cinatra:r2]", target_date: null }),
-    );
+  it("upsertTriggerTask re-creates when the existingTaskId 404s (PATCH→404 then find-or-create)", async () => {
+    fetchMock
+      // 1) PATCH existing id -> 404 (deleted upstream)
+      .mockResolvedValueOnce(jsonResponse(404, { detail: "Not found." }))
+      // 2) find-by-marker LIST -> none
+      .mockResolvedValueOnce(jsonResponse(200, { results: [] }))
+      // 3) CREATE -> 201 (fresh id)
+      .mockResolvedValueOnce(
+        jsonResponse(201, { id: "wi-new", name: "cinatra run r1 [cinatra:r1]", target_date: "2026-06-20" }),
+      )
+      // 4) reconcile LIST -> only our own
+      .mockResolvedValueOnce(jsonResponse(200, { results: [{ id: "wi-new", name: "x [cinatra:r1]" }] }));
+
+    const ref = await planeConnector.upsertTriggerTask({
+      task: { ...TASK },
+      existingTaskId: "wi-gone",
+    });
+
+    expect(ref.externalTaskId).toBe("wi-new");
+    expect(fetchMock.mock.calls[0][1].method).toBe("PATCH");
+    expect(fetchMock.mock.calls[0][0]).toContain("/work-items/wi-gone/");
+  });
+
+  it("NATURAL-KEY IDEMPOTENCY: a null-id upsert that finds an existing item by marker PATCHes it (never blind-creates a duplicate)", async () => {
+    fetchMock
+      // 1) find-by-marker LIST -> a prior (timed-out-at-host) push already created wi-prior
+      .mockResolvedValueOnce(
+        jsonResponse(200, { results: [{ id: "wi-prior", name: "cinatra run r1 [cinatra:r1]" }] }),
+      )
+      // 2) PATCH the surviving match (NOT a create)
+      .mockResolvedValueOnce(
+        jsonResponse(200, { id: "wi-prior", name: "cinatra run r1 [cinatra:r1]", target_date: "2026-06-20" }),
+      );
+
+    const ref = await planeConnector.upsertTriggerTask({
+      task: { ...TASK },
+      existingTaskId: null,
+    });
+
+    // Re-established the link to the prior item; no orphaned duplicate.
+    expect(ref.externalTaskId).toBe("wi-prior");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The second call is a PATCH to the found id — NOT a POST create.
+    expect(fetchMock.mock.calls[1][1].method).toBe("PATCH");
+    expect(fetchMock.mock.calls[1][0]).toContain("/work-items/wi-prior/");
+  });
+
+  it("STRICT natural-key lookup: a FAILED find-by-marker LIST throws (never blind-creates on an unconfirmed empty set)", async () => {
+    // The host bridge is fail-open — a thrown upsert is logged + recorded and
+    // the reconcile loop retries — so failing the lookup is correct, whereas a
+    // blind POST could orphan a duplicate the prior push already created.
+    fetchMock
+      // find-by-marker LIST -> 503 (lookup failure, NOT a confirmed no-match)
+      .mockResolvedValueOnce(jsonResponse(503, { detail: "service unavailable" }));
 
     await expect(
-      planeConnector.upsertRunTask({
-        runId: "r2",
-        triggerType: "scheduled",
-        scheduledAt: "2026-07-01T09:00:00.000Z",
-        timezone: "UTC",
+      planeConnector.upsertTriggerTask({
+        task: { ...TASK, runId: "rfail" },
+        existingTaskId: null,
+      }),
+    ).rejects.toThrow(/HTTP 503/);
+    // Crucially: NO create (POST) was attempted after the failed lookup.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.every((c) => (c[1]?.method ?? "GET") !== "POST")).toBe(true);
+  });
+
+  it("LOUDLY fails when Plane silently drops target_date (the due_date trap)", async () => {
+    fetchMock
+      // find-by-marker LIST -> none
+      .mockResolvedValueOnce(jsonResponse(200, { results: [] }))
+      // CREATE 201 but target_date comes back null — fail BEFORE the reconcile.
+      .mockResolvedValueOnce(
+        jsonResponse(201, { id: "wi-2", name: "x [cinatra:r2]", target_date: null }),
+      );
+
+    await expect(
+      planeConnector.upsertTriggerTask({
+        task: { ...TASK, runId: "r2", scheduledAt: "2026-07-01T09:00:00.000Z" },
+        existingTaskId: null,
       }),
     ).rejects.toThrow(/silently dropped target_date/i);
   });
 
-  it("deleteRunTask DELETEs the mapped work item and drops the mapping (idempotent)", async () => {
-    taskMap.set("r3", "wi-3");
+  it("deleteTriggerTask DELETEs the given externalTaskId (idempotent on 404 + empty id)", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(204, null));
 
-    await planeConnector.deleteRunTask({ runId: "r3" });
+    await planeConnector.deleteTriggerTask({ runId: "r3", externalTaskId: "wi-3" });
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toContain("/work-items/wi-3/");
+    expect(url).toBe(`${PROJECT_BASE}/work-items/wi-3/`);
     expect(init.method).toBe("DELETE");
-    expect(taskMap.has("r3")).toBe(false);
 
-    // Second call is a no-op (no mapping) — no fetch.
-    fetchMock.mockClear();
-    await planeConnector.deleteRunTask({ runId: "r3" });
+    // 404 is treated as already-gone success (no throw).
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: "Not found." }));
+    await expect(
+      planeConnector.deleteTriggerTask({ runId: "r3", externalTaskId: "wi-3" }),
+    ).resolves.toBeUndefined();
+
+    // Empty external id is a no-op (no fetch).
+    fetchMock.mockReset();
+    await planeConnector.deleteTriggerTask({ runId: "r3", externalTaskId: "" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("getRunTask reads the mapped work item, returns null + drops mapping on 404", async () => {
-    taskMap.set("r4", "wi-4");
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, { id: "wi-4", name: "x", target_date: "2026-06-20" }),
-    );
-    const task = await planeConnector.getRunTask({ runId: "r4" });
-    expect(task?.id).toBe("wi-4");
-
-    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: "Not found." }));
-    const gone = await planeConnector.getRunTask({ runId: "r4" });
-    expect(gone).toBeNull();
-    expect(taskMap.has("r4")).toBe(false);
-  });
-
-  it("rejects a malformed target_date BEFORE the write (strict YYYY-MM-DD)", async () => {
+  it("rejects a malformed scheduledAt BEFORE any write (strict YYYY-MM-DD)", async () => {
     await expect(
-      planeConnector.upsertRunTask({
-        runId: "r5",
-        triggerType: "scheduled",
-        scheduledAt: "not-a-date",
-        timezone: "UTC",
+      planeConnector.upsertTriggerTask({
+        task: { ...TASK, runId: "r5", scheduledAt: "not-a-date" },
+        existingTaskId: null,
       }),
     ).rejects.toThrow(/invalid calendar date/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("concurrency reconcile: converges on the lexicographically-smallest survivor and deletes duplicates", async () => {
-    // Our create returns "wi-zzz"; the reconcile LIST reveals a concurrent
-    // duplicate "wi-aaa". The deterministic survivor is min id = "wi-aaa", so
-    // OUR "wi-zzz" must be DELETEd and "wi-aaa" adopted as the mapping.
+    // find-by-marker initially empty; our create returns "wi-zzz"; the reconcile
+    // LIST reveals a concurrent duplicate "wi-aaa". Deterministic survivor is
+    // min id = "wi-aaa", so OUR "wi-zzz" is DELETEd and "wi-aaa" adopted.
     fetchMock
-      // 1) CREATE -> 201 (our id, the larger one)
+      // 1) find-by-marker LIST -> none yet
+      .mockResolvedValueOnce(jsonResponse(200, { results: [] }))
+      // 2) CREATE -> 201 (our id, the larger one)
       .mockResolvedValueOnce(
         jsonResponse(201, { id: "wi-zzz", name: "run [cinatra:rc]", target_date: "2026-06-20" }),
       )
-      // 2) reconcile LIST -> both duplicates carry the marker
+      // 3) reconcile LIST -> both duplicates carry the marker
       .mockResolvedValueOnce(
         jsonResponse(200, {
           results: [
@@ -218,51 +286,48 @@ describe("planeConnector — auth + work-item CRUD (smoke-proven)", () => {
           ],
         }),
       )
-      // 3) DELETE our non-survivor "wi-zzz" -> 204
+      // 4) DELETE our non-survivor "wi-zzz" -> 204
       .mockResolvedValueOnce(jsonResponse(204, null));
 
-    const task = await planeConnector.upsertRunTask({
-      runId: "rc",
-      triggerType: "scheduled",
-      scheduledAt: "2026-06-20T09:00:00.000Z",
-      timezone: "UTC",
+    const ref = await planeConnector.upsertTriggerTask({
+      task: { ...TASK, runId: "rc" },
+      existingTaskId: null,
     });
 
     // Survivor is the smallest id, deterministically.
-    expect(task.id).toBe("wi-aaa");
-    expect(taskMap.get("rc")).toBe("wi-aaa");
-    // The 3rd call deleted OUR duplicate (the non-survivor).
-    expect(fetchMock.mock.calls[2][1].method).toBe("DELETE");
-    expect(fetchMock.mock.calls[2][0]).toContain("/work-items/wi-zzz/");
+    expect(ref.externalTaskId).toBe("wi-aaa");
+    // The 4th call deleted OUR duplicate (the non-survivor).
+    expect(fetchMock.mock.calls[3][1].method).toBe("DELETE");
+    expect(fetchMock.mock.calls[3][0]).toContain("/work-items/wi-zzz/");
   });
 
-  it("reconcile is best-effort: a failed LIST keeps our own create (single happy path unaffected)", async () => {
+  it("reconcile is best-effort: a failed reconcile LIST keeps our own create", async () => {
     fetchMock
+      // find-by-marker LIST -> none
+      .mockResolvedValueOnce(jsonResponse(200, { results: [] }))
+      // CREATE -> 201
       .mockResolvedValueOnce(
         jsonResponse(201, { id: "wi-solo", name: "run [cinatra:rs]", target_date: "2026-06-20" }),
       )
       // reconcile LIST fails -> keep our create
       .mockResolvedValueOnce(jsonResponse(500, { detail: "boom" }));
 
-    const task = await planeConnector.upsertRunTask({
-      runId: "rs",
-      triggerType: "scheduled",
-      scheduledAt: "2026-06-20T09:00:00.000Z",
-      timezone: "UTC",
+    const ref = await planeConnector.upsertTriggerTask({
+      task: { ...TASK, runId: "rs" },
+      existingTaskId: null,
     });
-    expect(task.id).toBe("wi-solo");
-    expect(taskMap.get("rs")).toBe("wi-solo");
+    expect(ref.externalTaskId).toBe("wi-solo");
   });
 
   it("surfaces a 403 invalid-key/non-member/bogus-project as a PlaneRestError", async () => {
+    // existingTaskId path: PATCH -> 403 propagates (not a 404, so no fallback).
     fetchMock.mockResolvedValueOnce(
       jsonResponse(403, { detail: "Given API token is not valid" }),
     );
     await expect(
-      planeConnector.upsertRunTask({
-        runId: "r6",
-        triggerType: "immediate",
-        timezone: "UTC",
+      planeConnector.upsertTriggerTask({
+        task: { ...TASK, runId: "r6", triggerType: "immediate", scheduledAt: null },
+        existingTaskId: "wi-x",
       }),
     ).rejects.toThrow(/HTTP 403/);
   });

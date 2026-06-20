@@ -61,13 +61,19 @@ describe("plane-connector register(ctx)", () => {
     // loadInstanceConfig reads the namespaced instance row via the generic store.
     expect(await deps.loadInstanceConfig()).toBeNull();
     expect(read).toHaveBeenCalledWith("@cinatra-ai/plane-connector:instance", null);
-    // runId→taskId mapping is written to its OWN per-run namespaced key
-    // (race-free — no shared-map read-modify-write).
-    await deps.saveRunTaskId("r1", "wi-1");
-    expect(write).toHaveBeenCalledWith(
-      "@cinatra-ai/plane-connector:run-task:r1",
-      "wi-1",
-    );
+    // saveInstanceConfig writes the namespaced instance row via the generic store.
+    // NOTE (#366): the connector keeps NO runId→taskId mapping — the host owns
+    // the pm-link table — so there is no run-task key write here.
+    const instance = {
+      instanceId: "plane-default",
+      baseUrl: "http://127.0.0.1:3400",
+      workspaceSlug: "ws",
+      projectId: "p",
+      encryptedPat: { ciphertext: "c", iv: "i" },
+      updatedAt: "2026-06-19T00:00:00.000Z",
+    };
+    await deps.saveInstanceConfig(instance);
+    expect(write).toHaveBeenCalledWith("@cinatra-ai/plane-connector:instance", instance);
   });
 
   it("a deps member throws a clear error when its host service is missing", () => {

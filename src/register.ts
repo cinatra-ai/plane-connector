@@ -31,16 +31,13 @@ import {
 
 const PACKAGE_NAME = "@cinatra-ai/plane-connector";
 
-// Connector-config row keys (namespaced under this package so the generic host
+// Connector-config row key (namespaced under this package so the generic host
 // connector-config store never collides with another connector's rows).
+//
+// NOTE (merged PmConnector contract, #366): the HOST owns the
+// runId<->externalTaskId link table (pm-link) — the connector keeps NO
+// runId→taskId mapping rows. Only the single instance-config row is stored here.
 const INSTANCE_CONFIG_KEY = `${PACKAGE_NAME}:instance`;
-// Each runId→taskId mapping lives in its OWN namespaced row (direct
-// read/write/delete) — NOT a single shared map row. The generic host
-// connector-config store is plain KV with a short per-process cache and no
-// atomic merge/lock, so a read-modify-write of one shared map would race across
-// concurrent/cross-process trigger ops and clobber mappings (orphaning Plane
-// tasks). Per-run keys keep every mapping write/delete independent.
-const runTaskKey = (runId: string) => `${PACKAGE_NAME}:run-task:${runId}`;
 
 // Local STRUCTURAL shape of the host secrets-codec service this connector
 // adapts into its deps slot.
@@ -49,8 +46,8 @@ type HostSecretsCodecShape = PlaneSecretsCodec;
 // Local STRUCTURAL shape of the EXISTING generic host connector-config store
 // (capability id `@cinatra-ai/host:connector-config`, published by
 // register-host-connector-services). The connector builds its typed
-// instance/run-task surface on top of these generic read/write/delete members
-// — no bespoke host capability is required.
+// instance-config surface on top of these generic read/write members — no
+// bespoke host capability is required.
 type HostConnectorConfigShape = {
   read<T>(connectorId: string, fallback: T): T;
   write(connectorId: string, value: unknown): void;
@@ -88,15 +85,6 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): PlaneConnectorHostDeps {
       config().read<PlaneInstanceConfig | null>(INSTANCE_CONFIG_KEY, null),
     saveInstanceConfig: async (instance) => {
       config().write(INSTANCE_CONFIG_KEY, instance);
-    },
-    // Per-run keys — direct read/write/delete, no read-modify-write of a shared
-    // map (race-free across concurrent/cross-process trigger ops).
-    loadRunTaskId: async (runId) => config().read<string | null>(runTaskKey(runId), null),
-    saveRunTaskId: async (runId, taskId) => {
-      config().write(runTaskKey(runId), taskId);
-    },
-    deleteRunTaskId: async (runId) => {
-      config().delete(runTaskKey(runId));
     },
   };
 }
