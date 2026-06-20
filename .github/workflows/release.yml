@@ -1,0 +1,35 @@
+# Publish this extension to the Cinatra Marketplace on a GitHub Release.
+#
+# Thin caller: a published GitHub Release whose tag is `v<package.json
+# .version>` builds + submits this extension through the marketplace MCP proxy
+# (extension-submit-for-review → approve → promotion saga → registry.cinatra.ai),
+# NEVER a direct Verdaccio publish. All build/pack/gate/submit logic lives in the
+# central reusable workflow; this file just wires the trigger + grants the
+# provenance permissions + inherits the org submit secret.
+#
+# Dormant until the org infra exists (the cinatra-ai/.github reusable workflow +
+# the CINATRA_MARKETPLACE_VENDOR_TOKEN org secret). Pre-release tags are skipped
+# by the reusable workflow; the tag==version check is enforced there too.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  # Manual backfill: the reusable workflow REFUSES a dispatch unless it is run
+  # against a TAG ref equal to v<package.json.version> (a branch HEAD can never
+  # publish). Run it from the tag, e.g. `gh workflow run release.yml --ref v1.2.3`.
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    permissions:
+      contents: write       # GitHub Release decoration (PR-list notes + tarball/checksums assets)
+      id-token: write       # build-provenance attestation
+      attestations: write
+    # cinatra-ai/.github has no version tags yet; pinned to its main HEAD
+    # (21f807e7, 2026-06-13 — the eng#173 dependency-ordering-gate repoint:
+    # existence is verified via the broker-mediated OIDC ability instead of a
+    # direct registry read that 401s in Actions). The trailing comment marker
+    # below satisfies the actions-pinned-gate contract for this untagged pin.
+    uses: cinatra-ai/.github/.github/workflows/reusable-extension-release.yml@fea09b38e94c0a64f7fab3c02d34b0fe1ecf746d # v0.1.0
+    secrets: inherit

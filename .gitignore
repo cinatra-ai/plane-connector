@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output (tsconfig outDir)
+dist/
+
+# Test coverage
+coverage/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Internal planning notes (owner policy: local-only, untracked)
+.planning/
