@@ -12,7 +12,10 @@
 //   - the HOST owns the runId<->externalTaskId link — the connector keeps NO
 //     local mapping (existingTaskId is passed IN; PmTaskRef is returned).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { planeConnector } from "../plane-connector";
+// `planeConnectorImpl` is the local-typed impl exposing `readTriggerTask`
+// statically even on `main` (where the SDK `PmConnector` does not yet declare
+// it — cinatra#319 landing order). `planeConnector` is the widened export.
+import { planeConnector, planeConnectorImpl } from "../plane-connector";
 import {
   registerPlaneConnector,
   _resetPlaneDepsForTests,
@@ -330,5 +333,166 @@ describe("planeConnector — merged PmConnector contract + smoke-proven wire", (
         existingTaskId: "wi-x",
       }),
     ).rejects.toThrow(/HTTP 403/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // readTriggerTask (cinatra#319 pre-execution PM check) — inbound READ dual.
+  // The host maps a clean `null` to "deleted -> tear down" and ANY throw to
+  // "unreachable -> fail-open proceed". So `null` is reserved for a clean 404;
+  // every other error path MUST throw, never falsely delete a live schedule.
+  // ---------------------------------------------------------------------------
+  describe("readTriggerTask — fail-open read-back contract", () => {
+    it("GETs the scoped work item and maps connector-owned metadata to PmTaskState (recurring: cron + paused)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: "wi-1",
+          name: "cinatra run r1 [cinatra:r1]",
+          description_stripped:
+            "cinatra run r1\ntrigger: recurring\ncron: 0 9 * * 1\ntz: UTC\n(trigger disabled)",
+          target_date: "2026-06-20",
+        }),
+      );
+
+      const state = await planeConnectorImpl.readTriggerTask({
+        runId: "r1",
+        externalTaskId: "wi-1",
+      });
+
+      // GET to the project-scoped work-item-by-id endpoint, X-API-Key only.
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${PROJECT_BASE}/work-items/wi-1/`);
+      expect((init.method ?? "GET")).toBe("GET");
+      const headers = init.headers as Record<string, string>;
+      expect(headers["x-api-key"]).toBe(PAT_PLAINTEXT);
+      expect(headers.authorization).toBeUndefined();
+      expect(headers.Authorization).toBeUndefined();
+
+      expect(state).not.toBeNull();
+      expect(state).toEqual({
+        externalTaskId: "wi-1",
+        paused: true,
+        cronExpression: "0 9 * * 1",
+        scheduledAt: "2026-06-20T00:00:00.000Z", // no `scheduled:` line -> target_date fallback
+      });
+    });
+
+    it("scheduled trigger: prefers the exact `scheduled:` instant (no phantom reschedule vs the local snapshot)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: "wi-2",
+          name: "cinatra run r2 [cinatra:r2]",
+          description_stripped:
+            "cinatra run r2\ntrigger: scheduled\nscheduled: 2026-06-20T09:00:00.000Z\ntz: UTC",
+          target_date: "2026-06-20",
+        }),
+      );
+
+      const state = await planeConnectorImpl.readTriggerTask({
+        runId: "r2",
+        externalTaskId: "wi-2",
+      });
+
+      // The exact stamped instant wins over the day-level target_date so the
+      // host's scheduled-instant diff stays stable.
+      expect(state).toEqual({
+        externalTaskId: "wi-2",
+        paused: false,
+        cronExpression: null,
+        scheduledAt: "2026-06-20T09:00:00.000Z",
+      });
+    });
+
+    it("not paused, no cron, no scheduled line, no target_date -> all null/false", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: "wi-3",
+          name: "cinatra run r3 [cinatra:r3]",
+          description_stripped: "cinatra run r3\ntrigger: immediate\ntz: UTC",
+          target_date: null,
+        }),
+      );
+
+      const state = await planeConnectorImpl.readTriggerTask({
+        runId: "r3",
+        externalTaskId: "wi-3",
+      });
+      expect(state).toEqual({
+        externalTaskId: "wi-3",
+        paused: false,
+        cronExpression: null,
+        scheduledAt: null,
+      });
+    });
+
+    it("robust to a FLATTENED (space-joined) description — labels are bounded by the next known label", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: "wi-4",
+          name: "cinatra run r4 [cinatra:r4]",
+          // Plane normalized the newlines to spaces.
+          description_stripped:
+            "cinatra run r4 trigger: recurring cron: 0 9 * * 1 tz: UTC (trigger disabled)",
+          target_date: "2026-06-20",
+        }),
+      );
+
+      const state = await planeConnectorImpl.readTriggerTask({
+        runId: "r4",
+        externalTaskId: "wi-4",
+      });
+      // cron must NOT swallow the trailing `tz:`/marker; paused still detected.
+      expect(state).toEqual({
+        externalTaskId: "wi-4",
+        paused: true,
+        cronExpression: "0 9 * * 1",
+        scheduledAt: "2026-06-20T00:00:00.000Z",
+      });
+    });
+
+    it("returns null ONLY on a clean 404 (definitive upstream delete -> host tears down)", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: "Not found." }));
+      const state = await planeConnectorImpl.readTriggerTask({
+        runId: "r5",
+        externalTaskId: "wi-gone",
+      });
+      expect(state).toBeNull();
+    });
+
+    it("THROWS on a 403 (auth/authz) — never a false delete (host fail-opens unreachable)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(403, { detail: "Given API token is not valid" }),
+      );
+      await expect(
+        planeConnectorImpl.readTriggerTask({ runId: "r6", externalTaskId: "wi-6" }),
+      ).rejects.toThrow(/HTTP 403/);
+    });
+
+    it("THROWS on a 5xx outage — never a false delete", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(503, { detail: "unavailable" }));
+      await expect(
+        planeConnectorImpl.readTriggerTask({ runId: "r7", externalTaskId: "wi-7" }),
+      ).rejects.toThrow(/HTTP 503/);
+    });
+
+    it("THROWS on a network failure (fetch reject -> PlaneRestError status 0) — never a false delete", async () => {
+      fetchMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+      await expect(
+        planeConnectorImpl.readTriggerTask({ runId: "r8", externalTaskId: "wi-8" }),
+      ).rejects.toThrow(/upstream fetch failed/i);
+    });
+
+    it("THROWS on a 200 with an empty/idless body — not a definitive delete", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { name: "no id here" }));
+      await expect(
+        planeConnectorImpl.readTriggerTask({ runId: "r9", externalTaskId: "wi-9" }),
+      ).rejects.toThrow(/no body\/id/i);
+    });
+
+    it("THROWS on an empty externalTaskId (host invariant break, not a delete) — no fetch", async () => {
+      await expect(
+        planeConnectorImpl.readTriggerTask({ runId: "r10", externalTaskId: "" }),
+      ).rejects.toThrow(/empty externalTaskId/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
   });
 });
