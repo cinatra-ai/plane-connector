@@ -8,6 +8,7 @@ import "server-only";
 // CONTRACT (packages/sdk-extensions/src/pm-connector-contract.ts, merged):
 //   - upsertTriggerTask({ task, existingTaskId }) -> PmTaskRef
 //   - deleteTriggerTask({ runId, externalTaskId }) -> void
+//   - readTriggerTask({ runId, externalTaskId })  -> PmTaskState | null
 // The HOST owns the runId<->externalTaskId link table (pm-link); it passes
 // `existingTaskId` in and persists the returned `PmTaskRef.externalTaskId`. The
 // connector therefore does NOT keep its own runId->taskId mapping. It only
@@ -28,6 +29,19 @@ import "server-only";
 // no error). This connector NEVER sends due_date and ALWAYS asserts the echoed
 // target_date after a write — a dropped date is surfaced as a loud error instead
 // of silent data loss.
+//
+// READ-BACK / FAIL-OPEN (cinatra#319, load-bearing): readTriggerTask is the
+// inbound dual of the outbound upsert. It runs on the EXECUTION hot path so the
+// host can honor a PM-side delete/pause/reschedule before firing. Plane CE has
+// NO native pause or cron field on a work item, so the connector OWNS that state
+// in the metadata IT writes on upsert (the description lines `cron:` /
+// `scheduled:` / `(trigger disabled)`); readTriggerTask maps that metadata BACK
+// to the provider-agnostic PmTaskState. CONTRACT: a clean 404 (the item was
+// deleted upstream) is the ONLY signal returned as `null` (host tears down the
+// schedule); EVERY other error/outage/timeout/malformed-read is RETHROWN so the
+// host fail-opens (`unreachable` -> the schedule fires). Returning `null` on a
+// transient blip would wrongly delete a live schedule, so non-404 paths never
+// return null.
 
 import type {
   PmConnector,
@@ -38,6 +52,41 @@ import type {
 import { planeRest, PlaneRestError } from "./plane-rest-call";
 
 const PROVIDER_ID = "plane";
+
+// LANDING-ORDER NOTE (cinatra#319): `readTriggerTask` + its `PmTaskState` return
+// type are added to the SDK `PmConnector` interface by cinatra#319 (PR #370).
+// This connector is re-pinned into cinatra `main` BEFORE that interface change
+// lands, so on `main` the SDK `PmConnector` does NOT yet declare
+// `readTriggerTask` and does NOT export `PmTaskState`. To keep the SAME source
+// typechecking GREEN on BOTH trees we (a) do NOT import `PmTaskState` by name
+// (it's absent on main) and instead mirror its shape locally as
+// `PmTaskStateLocal`, and (b) build the impl typed to a LOCAL
+// `PlaneConnectorImpl extends PmConnector` interface and export it WIDENED to
+// `PmConnector`. On main the extra `readTriggerTask` method widens cleanly via
+// assignability (no excess-property-check, because the export is from a variable
+// not a fresh literal); once #319 lands, `extends PmConnector` binds the local
+// method to the SDK signature and structural typing matches `PmTaskStateLocal`
+// to the SDK `PmTaskState` — so no further connector change is needed.
+type PmTaskStateLocal = {
+  externalTaskId: string;
+  paused: boolean;
+  cronExpression: string | null;
+  scheduledAt: string | null;
+};
+
+/**
+ * Local connector surface = the SDK `PmConnector` PLUS the `readTriggerTask`
+ * read-back method (cinatra#319). Declaring it via `extends PmConnector` means
+ * that once the SDK interface gains `readTriggerTask`, TypeScript binds this
+ * method to the SDK signature and flags any drift; until then it is simply an
+ * extra method the host that knows about #319 calls structurally.
+ */
+interface PlaneConnectorImpl extends PmConnector {
+  readTriggerTask(input: {
+    runId: string;
+    externalTaskId: string;
+  }): Promise<PmTaskStateLocal | null>;
+}
 
 // ---------------------------------------------------------------------------
 // Plane raw work-item shape (subset of fields cinatra reads).
@@ -133,9 +182,83 @@ function toTaskRef(item: PlaneWorkItem): PmTaskRef {
 }
 
 // ---------------------------------------------------------------------------
+// READ-BACK parsing: map a Plane work item's connector-owned metadata back to
+// the provider-agnostic PmTaskState. The upsert stamps the cinatra schedule
+// state into the work-item DESCRIPTION (Plane CE has no native pause/cron field
+// on a work item), so the read mirror parses those same lines. Robust to Plane
+// text normalization: lines may be separated by `\n`, `\r\n`, or flattened to
+// spaces (description_stripped). Each extractor matches a `label:` token and the
+// value up to the next known label or end; an empty/whitespace-only value
+// normalizes to `null` (never an empty string — the host's structural guard
+// wants string-or-null).
+// ---------------------------------------------------------------------------
+
+/** The disabled marker the upsert writes when `enabled === false`. */
+const DISABLED_MARKER = "(trigger disabled)";
+
+/** Known leading labels the description carries; used to bound a label's value
+ *  so a flattened (space-joined) description doesn't swallow the next field. */
+const META_LABELS = ["cinatra run", "trigger:", "cron:", "scheduled:", "tz:"];
+
+/**
+ * Extract the value following `label` from the work-item description, bounded by
+ * the next known meta label, the disabled marker, or end-of-text. Returns the
+ * trimmed value, or null when the label is absent or the value is empty. Works
+ * whether the description kept its newlines or was flattened to a single line.
+ */
+function extractMeta(description: string, label: string): string | null {
+  const idx = description.indexOf(label);
+  if (idx === -1) return null;
+  const after = description.slice(idx + label.length);
+  // Find the earliest next-boundary: any OTHER known label, the disabled marker,
+  // or a newline. Whatever comes first ends this value.
+  let end = after.length;
+  for (const other of [...META_LABELS, DISABLED_MARKER]) {
+    if (other === label) continue;
+    const at = after.indexOf(other);
+    if (at !== -1 && at < end) end = at;
+  }
+  const nl = after.search(/[\r\n]/);
+  if (nl !== -1 && nl < end) end = nl;
+  const value = after.slice(0, end).trim();
+  return value.length > 0 ? value : null;
+}
+
+/**
+ * Map a fetched Plane work item to the provider-agnostic PmTaskState. The
+ * connector OWNS pause/cron/scheduled state in the description it wrote on
+ * upsert; here we read it back. `scheduledAt` prefers the EXACT instant the
+ * upsert stamped (the `scheduled:` line) so a `scheduled` trigger does not
+ * phantom-reschedule every tick (the host diffs the instant for scheduled
+ * triggers); it falls back to deriving a midnight-UTC instant from `target_date`
+ * (day granularity) only when no explicit instant was stamped.
+ */
+function toTaskState(item: PlaneWorkItem): PmTaskStateLocal {
+  const desc = item.description_stripped ?? "";
+  const paused = desc.includes(DISABLED_MARKER);
+  const cronExpression = extractMeta(desc, "cron:");
+  const stampedAt = extractMeta(desc, "scheduled:");
+  const scheduledAt =
+    stampedAt ?? (item.target_date ? `${item.target_date}T00:00:00.000Z` : null);
+  return {
+    externalTaskId: item.id,
+    paused,
+    cronExpression,
+    scheduledAt,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Connector implementation
 // ---------------------------------------------------------------------------
-export const planeConnector: PmConnector = {
+/**
+ * The Plane connector implementation, typed to the LOCAL `PlaneConnectorImpl`
+ * surface so `readTriggerTask` is statically visible to callers that know about
+ * cinatra#319 (e.g. this package's tests) EVEN ON `main`, where the SDK
+ * `PmConnector` does not yet declare it. The default export `planeConnector`
+ * (widened to `PmConnector`) is what the registry consumes.
+ */
+export const planeConnectorImpl: PlaneConnectorImpl = {
   providerId: PROVIDER_ID,
 
   async upsertTriggerTask(input: {
@@ -230,7 +353,70 @@ export const planeConnector: PmConnector = {
       }
     }
   },
+
+  // -------------------------------------------------------------------------
+  // READ-BACK (cinatra#319 pre-execution PM check). Inbound dual of the upsert:
+  // GET the mirrored work item and map its connector-owned metadata to the
+  // provider-agnostic PmTaskState.
+  //
+  // FAIL-OPEN CONTRACT (load-bearing): a clean 404 (the work item was deleted
+  // upstream for this externalTaskId) is the ONLY path that returns `null` — the
+  // host's definitive "deleted -> tear down the local schedule" signal. EVERY
+  // other condition RETHROWS so the host maps it to `unreachable -> fail-open
+  // proceed` (the schedule fires): a missing id (host invariant break), a network
+  // outage (PlaneRestError status 0), an auth/authz error (401/403), a 5xx, a
+  // parse failure, or a 200 with an empty/idless body. Returning `null` on any of
+  // those would wrongly delete a LIVE schedule on a transient blip — forbidden.
+  // -------------------------------------------------------------------------
+  async readTriggerTask(input: {
+    runId: string;
+    externalTaskId: string;
+  }): Promise<PmTaskStateLocal | null> {
+    const { externalTaskId } = input;
+    // An empty id is a host/connector invariant break, NOT a definitive upstream
+    // delete. Throw so the host fail-opens (`unreachable`), never tears down.
+    if (!externalTaskId) {
+      throw new PlaneRestError(
+        500,
+        "readTriggerTask called with an empty externalTaskId (no upstream task to read)",
+      );
+    }
+
+    let item: PlaneWorkItem | null;
+    try {
+      item = await planeRest<PlaneWorkItem>(
+        "GET",
+        `/work-items/${encodeURIComponent(externalTaskId)}/`,
+      );
+    } catch (err) {
+      // ONLY a clean 404 = the task was DELETED upstream -> null (teardown).
+      if (err instanceof PlaneRestError && err.status === 404) return null;
+      // Anything else (network 0, 401/403 auth, 5xx, parse fail) -> rethrow so
+      // the host fail-opens. NEVER swallow into a false delete.
+      throw err;
+    }
+
+    // A 200 with no body / no id is NOT a definitive delete — fail-open by
+    // throwing so the host treats it as unreachable, never as deleted.
+    if (!item || !item.id) {
+      throw new PlaneRestError(
+        500,
+        `Plane GET work-item returned no body/id for ${externalTaskId}`,
+      );
+    }
+
+    return toTaskState(item);
+  },
 };
+
+// Export WIDENED to the SDK `PmConnector`. On `main` (no `readTriggerTask` in the
+// interface) this widening is a plain assignability check — the extra method is
+// allowed because the source is a variable, not a fresh object literal (so no
+// excess-property-check). Once cinatra#319 lands and the interface requires
+// `readTriggerTask`, `PlaneConnectorImpl extends PmConnector` already guarantees
+// the impl satisfies it (structural match on `PmTaskStateLocal` ≅ SDK
+// `PmTaskState`), so this same line keeps compiling.
+export const planeConnector: PmConnector = planeConnectorImpl;
 
 // ---------------------------------------------------------------------------
 // List existing work items carrying this run's title marker (natural-key
