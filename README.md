@@ -1,18 +1,21 @@
-# @cinatra-ai/plane-connector
+# Plane
 
-Plane project-management provider for cinatra. A `kind: "connector"` extension that registers a `PmConnector` (provider id `plane`) behind the `pm-provider` capability from its `serverEntry`; the host's PM bridge resolves it via the SDK PM provider registry's external resolver, and the trigger lifecycle mirrors cinatra agent-run triggers into [Plane](https://plane.so) work items (fail-open — a Plane outage never breaks a trigger). Exposes 3 provider-specific MCP primitives (`plane_status`, `plane_instances_list`, `plane_projects_list`).
+Mirrors cinatra agent-run triggers into [Plane](https://plane.so) work items (project management). Configure with a Plane base URL, workspace slug, project id, and a user-level Plane API token (minted via **Profile → API Tokens** in Plane). The PAT is stored encrypted at rest. A Plane outage never breaks a trigger — the connector is fail-open.
+
+**Setup:** The connector requires a Plane base URL (e.g. `http://plane.example.com`), a workspace slug, a project id, and a user-level Plane API token (`plane_api_…`, minted in Plane under **Profile → API Tokens**). These are stored via the host connector-config store with the PAT encrypted at rest.
+
+**Failure modes:** A missing or wrong token returns 401 (no header) or 403 (invalid key). A non-member workspace or unknown project id returns 403. Use `plane_status` (MCP) to probe the connection after setup.
+
+**Development:** `pnpm test` runs the Vitest suite; `node extension-kind-gate.mjs` validates the extension manifest and README locally before publishing.
 
 ## Works with
 
-- The host PM bridge (`src/lib/register-pm-providers.ts`) that feeds the SDK PM provider registry's external resolver from the `pm-provider` capability
-- Self-hosted Plane CE (`makeplane/plane` community stack, smoke-proven against `v1.3.1`, via the docker stack `docker-compose.yml --profile plane`)
+- Self-hosted Plane CE (community stack, verified against v1.3.1)
 
 ## Capabilities
 
-- ✓ Mirrors cinatra agent-run triggers into Plane work items at trigger configure/delete time; per-run `runId → taskId` mappings stored in their own namespaced connector-config rows (race-free, no shared-map read-modify-write)
-- ✓ Auth via `X-API-Key` alone (the sole authenticator; `Authorization: Bearer` is rejected 401) using a user-level Plane PAT (`plane_api_…`, minted via `POST /api/users/api-tokens/`)
-- ✓ Encrypted PAT-at-rest via the host `secretsCodec` (AES-256-GCM, instance key) — never plaintext, decrypted in-process only
-- ✓ Explicit workspace-slug + project-id mapping; all work-item ops scope to `/workspaces/{slug}/projects/{projectId}/work-items/`; `plane_projects_list` enumerates projects for mapping
-- ✓ Day-level `start_date` / `target_date` (strict `YYYY-MM-DD`); never sends `due_date` (Plane REST silently drops it) and asserts the echoed `target_date` after every write, failing loudly on a dropped date
-- ✓ Uses `/work-items/` (the forward-looking alias of `/issues/` on Plane CE 1.3.1)
-- ✓ Multi-instance support via cinatra's connector-instance surface
+- ✓ Mirrors cinatra run triggers into Plane work items; day-level start and target dates (YYYY-MM-DD); never sends `due_date` (Plane silently drops it)
+- ✓ Idempotent upserts keyed on `runId` — a timed-out first push is found and updated on retry; duplicate reconciliation is best-effort
+- ✓ Encrypted PAT at rest (AES-256-GCM, host instance key); decrypted in-process only and sent as `X-API-Key`
+- ✓ Read-back via `readTriggerTask`: reads pause/cron/schedule state from Plane; a clean 404 tears down the schedule; any other error fail-opens (trigger fires)
+- ✓ MCP primitives: `plane_status` (health probe), `plane_instances_list`, `plane_projects_list`
