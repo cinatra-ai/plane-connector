@@ -1,0 +1,28 @@
+name: docs-contract-gate
+
+# Validate this repo's docs/ against the integration docs contract BEFORE a
+# release can publish it into the Integrations chapter on docs.cinatra.ai. Thin
+# caller of the reusable validator in cinatra-ai/ci; the docs publish path runs
+# the same gate at compile time against the tagged docs tree. Runs on every PR
+# and push to main so a non-conforming docs/ is caught long before a tag.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docs-contract-gate:
+    # Pin BOTH the workflow ref (`@<sha>`) and the `ref` input to the SAME commit
+    # SHA so the gate code is not pulled from mutable main. Pinned to the
+    # cinatra-ai/ci main HEAD that merged the reusable docs-contract validator
+    # (ci#43); the trailing comment marker satisfies the actions-pinned-gate
+    # contract for this untagged pin.
+    uses: cinatra-ai/ci/.github/workflows/docs-contract-gate.yml@1e0b01d53cecb920550e92370f4f2b41f2eca997 # v0.1.0
+    with:
+      docs: "docs"
+      slug: "plane"
+      ref: 1e0b01d53cecb920550e92370f4f2b41f2eca997
