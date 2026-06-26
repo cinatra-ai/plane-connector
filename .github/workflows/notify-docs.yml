@@ -1,0 +1,61 @@
+name: Notify docs build on release tag
+
+# On a semver tag (a new release), fire repository_dispatch(integration-docs-pushed)
+# at ops so its docs build re-compiles + republishes THIS integration's docs/
+# into the Integrations chapter on docs.cinatra.ai. Mirrors the public
+# cinatra-ai/docs notify-ops.yml pattern, but gated on a release TAG rather than
+# a push to main: docs publish ONLY on a new release, so a docs-only fix rides a
+# patch release rather than republishing on every commit.
+#
+# Requires the CINATRA_OPS_DISPATCH_TOKEN repo secret (a fine-grained PAT scoped
+# to cinatra-ai/ops with Contents: write). Until that secret is set, this job
+# no-ops gracefully and docs republish via the ops scheduled fallback / manual
+# workflow_dispatch.
+
+on:
+  push:
+    tags: ['v*']
+  # Manual backfill ONLY from a release tag — a branch HEAD (e.g. main) must
+  # never republish docs. The job is guarded below so a workflow_dispatch run
+  # against a non-`v*`-tag ref is skipped, keeping the strict release-only
+  # contract (mirrors release.yml: a dispatch must target the tag).
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notify-docs
+  cancel-in-progress: true
+
+jobs:
+  notify:
+    name: Dispatch integration-docs-pushed
+    runs-on: ubuntu-latest
+    # Release-only: proceed only when the ref is a `v*` tag. A push trigger only
+    # fires on a tag (the `on:` filter), and a workflow_dispatch is additionally
+    # constrained here so it cannot republish from a branch HEAD.
+    if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    steps:
+      - name: Fire repository_dispatch to ops
+        env:
+          GH_TOKEN: ${{ secrets.CINATRA_OPS_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "CINATRA_OPS_DISPATCH_TOKEN not set — skipping dispatch."
+            echo "Operator: add the secret to enable auto-republish; until then the"
+            echo "ops docs build republishes via its scheduled fallback / manual"
+            echo "workflow_dispatch."
+            exit 0
+          fi
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/cinatra-ai/ops/dispatches \
+            -d "$(jq -nc --arg sha "$SHA" --arg ref "$REF" --arg repo "$REPO" \
+                  '{event_type:"integration-docs-pushed",client_payload:{repo:$repo,sha:$sha,ref:$ref}}')"

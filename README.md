@@ -8,6 +8,8 @@ Mirrors cinatra agent-run triggers into [Plane](https://plane.so) work items (pr
 
 **Development:** `pnpm test` runs the Vitest suite; `node extension-kind-gate.mjs` validates the extension manifest and README locally before publishing.
 
+**Documentation:** the full integration hub lives at [docs.cinatra.ai/integrations/plane](https://docs.cinatra.ai/integrations/plane/) — overview, quick start, settings & permissions, and troubleshooting. The source pages are in this repo under `docs/` and republish on each release tag.
+
 ## Works with
 
 - Self-hosted Plane CE (community stack, verified against v1.3.1)
