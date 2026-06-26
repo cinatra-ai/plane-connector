@@ -1,0 +1,5 @@
+# Code owners for cinatra-ai/plane-connector.
+# FULL-tier repos require CODEOWNERS per the org docs-tier policy.
+# Listed owners are requested for review on PRs touching matching paths.
+# Reference: https://docs.github.com/articles/about-code-owners
+* @groganz @megajustice
