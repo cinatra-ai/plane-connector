@@ -1,6 +1,6 @@
 # Trim CI/internal noise from `git archive` (and GitHub's auto Source code
 # archives, which git archive generates) per the org release-artifact standard
-# (cinatra-ai/cinatra-engineering#56). Directory excludes use the `/**` form:
+# Per the org release-artifact standard. Directory excludes use the `/**` form:
 # bare `dir/` patterns do not recurse reliably for export-ignore.
 .gitattributes export-ignore
 .gitignore export-ignore
