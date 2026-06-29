@@ -27,7 +27,7 @@ jobs:
       id-token: write       # build-provenance attestation
       attestations: write
     # cinatra-ai/.github has no version tags yet; pinned to its main HEAD
-    # (21f807e7, 2026-06-13 — the eng#173 dependency-ordering-gate repoint:
+    # (21f807e7, 2026-06-13 — the dependency-ordering-gate repoint:
     # existence is verified via the broker-mediated OIDC ability instead of a
     # direct registry read that 401s in Actions). The trailing comment marker
     # below satisfies the actions-pinned-gate contract for this untagged pin.
