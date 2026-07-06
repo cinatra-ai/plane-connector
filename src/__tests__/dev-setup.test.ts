@@ -17,7 +17,6 @@ function makeDeps(): { deps: PlaneDevSetupDeps; upsertServer: ReturnType<typeof 
     helpers: {
       probeDockerContainer: vi.fn(() => true),
       probeHttp: vi.fn(() => true),
-      probeHttpAnswered: vi.fn(() => true),
       probeHttpReachableWithRetry: vi.fn(async () => true),
       dockerExecCapture: vi.fn(() => ({ code: 0, out: "" })),
       isLocalhostUrl: vi.fn(() => true),
