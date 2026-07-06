@@ -15,7 +15,8 @@
     "./register": "./src/register.ts",
     "./deps": "./src/deps.ts",
     "./mcp-module": "./src/mcp/module.ts",
-    "./setup-page": "./src/setup-page.tsx"
+    "./setup-page": "./src/setup-page.tsx",
+    "./src/dev-setup": "./src/dev-setup.ts"
   },
   "types": "./src/index.ts",
   "scripts": {
@@ -58,6 +59,7 @@
     "displayName": "Plane",
     "dependencies": [],
     "serverEntry": "./register",
+    "devSetup": "./src/dev-setup",
     "requestedHostPorts": [
       "capabilities"
     ],
