@@ -1,6 +1,6 @@
 {
   "name": "@cinatra-ai/plane-connector",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@10.33.3",
