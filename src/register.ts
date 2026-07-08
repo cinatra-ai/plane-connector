@@ -22,6 +22,7 @@
 
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { planeConnector } from "./plane-connector";
+import { planeWorkStore } from "./plane-work-store";
 import {
   registerPlaneConnector,
   type PlaneConnectorHostDeps,
@@ -93,6 +94,17 @@ export function register(ctx: ExtensionHostContext): void {
   ctx.capabilities.registerProvider("pm-provider", {
     packageName: PACKAGE_NAME,
     impl: planeConnector,
+  });
+  // Register the work-item CRUD store behind the SEPARATE `pm-work-store`
+  // capability (the "PmConnector v2" seam; cinatra#1031). The capability id is an
+  // inlined string literal (host-peer-value-import ban) — this connector never
+  // value-imports the id constant nor the SDK PmWorkStore type, so it stays green
+  // against the current SDK that does not yet export them (the host store bridge
+  // resolves this capability once its SDK contract + binding land). Registering
+  // behind an id no host yet resolves is a harmless no-op until then.
+  ctx.capabilities.registerProvider("pm-work-store", {
+    packageName: PACKAGE_NAME,
+    impl: planeWorkStore,
   });
   // Bind the host deps slot. Always-bind: re-activation — incl. a hot-update
   // digest swap — re-binds fresh lazy resolvers, so a stale deps object can
