@@ -146,9 +146,12 @@ describe("planeWorkStore — create (find-or-create) + read-after-write", () => 
     expect(sent.target_date).toBe("2026-07-12");
     expect("due_date" in sent).toBe(false);
     expect(sent.name).toContain("[cinatra-work:proj1/build]");
-    expect(sent.description).toContain("[cinatra-work-store]");
-    expect(sent.description).toContain("status: todo");
-    expect(sent.description).toContain("deps: proj1/plan");
+    // LIVE-SMOKE: Plane CE persists ONLY the rich-text description_html — the
+    // plain `description` field is dropped on write, so it must NOT be sent.
+    expect("description" in sent).toBe(false);
+    expect(sent.description_html).toContain("[cinatra-work-store]");
+    expect(sent.description_html).toContain("status: todo");
+    expect(sent.description_html).toContain("deps: proj1/plan");
   });
 
   it("IDEMPOTENCY (repeat-run): a second create for the same natural key finds + PATCHes the existing item (never a duplicate) — both runs return the SAME id", async () => {
@@ -295,7 +298,7 @@ describe("planeWorkStore — update / close (CAS, date-clear, read-after-write)"
     const item = await planeWorkStore.updateWorkItem({ id: "wi-1", patch: { status: "in_progress" } });
     expect(item.status).toBe("in_progress");
     expect(fetchMock.mock.calls[1][1].method).toBe("PATCH");
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string).description).toContain("status: in_progress");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string).description_html).toContain("status: in_progress");
   });
 
   it("date CLEAR: a null date is sent explicitly and read-back verified", async () => {
@@ -426,5 +429,239 @@ describe("planeWorkStore — credential safety + error codes", () => {
     expect(headers["x-api-key"]).toBe(PAT_PLAINTEXT);
     expect(headers.authorization).toBeUndefined();
     expect(headers.Authorization).toBeUndefined();
+  });
+});
+
+// ── LIVE-SMOKE-PROVEN Plane CE wire shapes (real round-trip against Plane CE) ──
+// Three shapes a real Plane CE round-trip proved (and that the docs-shape mocks
+// above did NOT capture): (1) a plain `description` sent on write is dropped —
+// only `description_html` persists; (2) on read Plane returns NEITHER
+// `description_stripped` NOR `description`, only `description_html`; (3) list
+// pagination returns a TRUTHY `next_cursor` on the terminal page and terminates
+// only on the explicit `next_page_results:false`.
+
+/** Build a `description_html` payload shaped like Plane CE's rich-text editor
+ *  echo (one <p> per line, with an attribute to prove tag-stripping is robust to
+ *  attributes) — the REAL read shape: no description_stripped, no description. */
+function planeCeDescriptionHtml(human: string, status: string, deps: string[]): string {
+  const lines = [
+    ...(human ? [human] : []),
+    "[cinatra-work-store]",
+    `status: ${status}`,
+    `deps: ${deps.join("|")}`,
+    "[/cinatra-work-store]",
+  ];
+  return lines.map((l) => `<p class="editor-paragraph">${l}</p>`).join("");
+}
+
+/** A raw Plane work item as REAL Plane CE returns it: ONLY `description_html`
+ *  (both `description_stripped` and `description` are absent). */
+function rawItemHtmlOnly(opts: {
+  id: string;
+  key: string;
+  title?: string;
+  status: string;
+  deps?: string[];
+  start?: string | null;
+  due?: string | null;
+  updated_at?: string;
+}): Record<string, unknown> {
+  const human = opts.title ?? "";
+  return {
+    id: opts.id,
+    name: `${human} [cinatra-work:${opts.key}]`.trim(),
+    description_html: planeCeDescriptionHtml(human, opts.status, opts.deps ?? []),
+    start_date: opts.start ?? null,
+    target_date: opts.due ?? null,
+    assignees: [],
+    updated_at: opts.updated_at ?? "2026-07-01T00:00:00Z",
+  };
+}
+
+describe("planeWorkStore — LIVE-SMOKE-PROVEN Plane CE wire shapes", () => {
+  it("READ path: an item returning ONLY description_html (no description_stripped/description) still parses status + deps and recovers the body", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        200,
+        rawItemHtmlOnly({
+          id: "wi-html",
+          key: "proj1/build",
+          title: "Ship the widget",
+          status: "in_progress",
+          deps: ["proj1/plan", "proj1/spec"],
+        }),
+      ),
+    );
+    const item = await planeWorkStore.getWorkItem({ id: "wi-html" });
+    expect(item?.naturalKey).toBe("proj1/build");
+    expect(item?.status).toBe("in_progress");
+    expect(item?.dependsOn).toEqual(["proj1/plan", "proj1/spec"]);
+    expect(item?.title).toBe("Ship the widget");
+    expect(item?.body).toBe("Ship the widget");
+  });
+
+  it("ROUND-TRIP (both directions): the description_html the connector WRITES, returned by Plane as description_html ONLY, reads back and passes read-after-write", async () => {
+    let sentBody: Record<string, unknown> | undefined;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "GET" && (url as string).includes("search=")) {
+        // find-by-marker LIST -> clean miss (terminal page).
+        return jsonResponse(200, { results: [], next_cursor: null, next_page_results: false });
+      }
+      if (method === "POST") {
+        sentBody = JSON.parse(init.body as string);
+        return jsonResponse(201, { id: "wi-rt" });
+      }
+      // read-back GET: Plane echoes ONLY description_html (the rich text we wrote).
+      return jsonResponse(200, {
+        id: "wi-rt",
+        name: "Build the thing [cinatra-work:proj1/build]",
+        description_html: sentBody?.description_html,
+        start_date: "2026-07-10",
+        target_date: "2026-07-12",
+        assignees: [],
+        updated_at: "2026-07-01T00:00:00Z",
+      });
+    });
+
+    const item = await planeWorkStore.createWorkItem({ item: { ...DRAFT } });
+
+    // WRITE direction: the block was sent in description_html (NOT description).
+    expect(sentBody && "description" in sentBody).toBe(false);
+    expect(sentBody?.description_html as string).toContain("<p");
+    expect(sentBody?.description_html as string).toContain("status: todo");
+    expect(sentBody?.description_html as string).toContain("deps: proj1/plan");
+    // READ direction: that same html, returned ONLY as description_html, mapped
+    // back cleanly and satisfied the fail-closed read-after-write assertion.
+    expect(item.id).toBe("wi-rt");
+    expect(item.status).toBe("todo");
+    expect(item.dependsOn).toEqual(["proj1/plan"]);
+    expect(item.body).toBe("do the build");
+  });
+
+  it("ROUND-TRIP fidelity: a body with real <, >, & operators AND entity-like literal text AND a blank line + indentation survives the description_html round-trip byte-for-byte", async () => {
+    // Real angle-brackets/ampersands, a literal "&amp;" the user typed, a blank
+    // line (paragraph break), and a leading-indented line — none of which may be
+    // corrupted by the text<->HTML conversion.
+    const RICH_BODY =
+      "if a < b && c > d then keep &amp;\n\n  indented second paragraph\nline three > ok";
+    let sentBody: Record<string, unknown> | undefined;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "GET" && (url as string).includes("search=")) {
+        return jsonResponse(200, { results: [], next_cursor: null, next_page_results: false });
+      }
+      if (method === "POST") {
+        sentBody = JSON.parse(init.body as string);
+        return jsonResponse(201, { id: "wi-rich" });
+      }
+      return jsonResponse(200, {
+        id: "wi-rich",
+        name: "Build the thing [cinatra-work:proj1/build]",
+        description_html: sentBody?.description_html, // Plane echoes ONLY the html
+        start_date: "2026-07-10",
+        target_date: "2026-07-12",
+        assignees: [],
+        updated_at: "2026-07-01T00:00:00Z",
+      });
+    });
+
+    const item = await planeWorkStore.createWorkItem({ item: { ...DRAFT, body: RICH_BODY } });
+    // The human body round-tripped exactly (operators, literal entity, blank line,
+    // indentation), AND the authoritative status/deps block still parsed.
+    expect(item.body).toBe(RICH_BODY);
+    expect(item.status).toBe("todo");
+    expect(item.dependsOn).toEqual(["proj1/plan"]);
+  });
+
+  it("READ path: an EMPTY-string description_stripped/description does NOT mask a populated description_html (fallback prefers the non-empty field)", async () => {
+    // The fragile case: Plane (or a proxy) returns description_stripped:"" instead
+    // of omitting it. A null-only fallback would take the "" and lose the block;
+    // the fallback must skip the empty field and strip description_html instead.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        id: "wi-empty",
+        name: "T [cinatra-work:proj1/x]",
+        description_stripped: "",
+        description: "",
+        description_html: planeCeDescriptionHtml("", "blocked", ["dep1", "dep2"]),
+        start_date: null,
+        target_date: null,
+        assignees: [],
+        updated_at: "u",
+      }),
+    );
+    const item = await planeWorkStore.getWorkItem({ id: "wi-empty" });
+    expect(item?.status).toBe("blocked");
+    expect(item?.dependsOn).toEqual(["dep1", "dep2"]);
+  });
+
+  it("READ path: nested/attribute-bearing tag fragments in description_html are fully stripped (no complete tag survives) while the status/deps block still parses", async () => {
+    // A body carrying overlapping angle-brackets ("<sp<b>an>") must leave NO
+    // complete "<...>" tag after stripping (the strip repeats to a fixpoint, so a
+    // fragment newly exposed by a removal is also cleared), and the clean
+    // authoritative block must still parse.
+    const bodyHtml = "<p>keep <sp<b>an>this</p>";
+    const blockHtml = planeCeDescriptionHtml("", "todo", ["d1"]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        id: "wi-nested",
+        name: "T [cinatra-work:proj1/x]",
+        description_html: bodyHtml + blockHtml,
+        start_date: null,
+        target_date: null,
+        assignees: [],
+        updated_at: "u",
+      }),
+    );
+    const item = await planeWorkStore.getWorkItem({ id: "wi-nested" });
+    expect(item?.status).toBe("todo");
+    expect(item?.dependsOn).toEqual(["d1"]);
+    // No complete "<...>" tag survived the fixpoint strip.
+    expect(/<[^>]+>/.test(item?.body ?? "")).toBe(false);
+  });
+
+  it("PAGINATION: terminates on next_page_results:false even when Plane returns a TRUTHY next_cursor on the terminal page (no over-pagination to the rate limit)", async () => {
+    fetchMock
+      // page 1: more results follow.
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          results: [rawItem({ id: "wi-1", key: "proj1/a", status: "todo" })],
+          next_cursor: "100:0:0",
+          next_page_results: true,
+        }),
+      )
+      // page 2: TERMINAL — a TRUTHY next_cursor, but next_page_results:false.
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          results: [rawItem({ id: "wi-2", key: "proj1/b", status: "done" })],
+          next_cursor: "100:1:0",
+          next_page_results: false,
+        }),
+      );
+
+    const items = await planeWorkStore.listWorkItems();
+    expect(items.map((i) => i.id).sort()).toEqual(["wi-1", "wi-2"]);
+    // The scan STOPPED at the terminal page: it did NOT follow the truthy
+    // "100:1:0" cursor into a (non-existent) page 3. Exactly two pages fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("PAGINATION: an EMPTY terminal page (0 results, truthy next_cursor, next_page_results:false) ends the scan — the exact over-pagination trap", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          results: [rawItem({ id: "wi-1", key: "proj1/a", status: "todo" })],
+          next_cursor: "100:0:100",
+          next_page_results: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { results: [], next_cursor: "100:1:0", next_page_results: false }),
+      );
+
+    const items = await planeWorkStore.listWorkItems();
+    expect(items.map((i) => i.id)).toEqual(["wi-1"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

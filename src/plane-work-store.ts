@@ -20,11 +20,19 @@ import "server-only";
 // auth; /work-items/ CRUD under the project scope; start_date/target_date accept
 // YYYY-MM-DD and due_date is SILENTLY DROPPED (never send it; assert the echo);
 // the searchable title-marker natural-key pattern.
+// LIVE-SMOKE-PROVEN (real Plane CE round-trip — the fixes below): (1) the rich
+// text description round-trips ONLY via `description_html` — a plain `description`
+// sent on write is dropped, and on read Plane returns NEITHER `description_stripped`
+// NOR `description`, only `description_html`; so the authoritative status/deps
+// block rides in `description_html` and is recovered by stripping it back to text.
+// (2) list pagination terminates on the explicit `next_page_results:false`, NOT on
+// a falsy cursor — Plane returns a TRUTHY `next_cursor` on the terminal page, so
+// keying only off cursor truthiness over-paginates to the page cap / rate limit.
 // PENDING LIVE SMOKE (coded to the documented Plane CE REST shape, MOCK-tested to
 // pin that shape, and GUARDED by read-after-write so a wrong shape fails LOUDLY,
 // never silently): the work-item `assignees` array, the `/comments/` endpoint
-// field names, `updated_at` presence, and list pagination cursor. These MUST be
-// verified against a live Plane CE before W2/W3 depend on them in production.
+// field names, and `updated_at` presence. These MUST be verified against a live
+// Plane CE before W2/W3 depend on them in production.
 //
 // ── AUTHORITATIVE STATE lives in SMOKE-SAFE channels ───────────────────────
 // To keep the contract's correctness guarantees independent of the un-proven
@@ -35,9 +43,10 @@ import "server-only";
 //                    [cinatra:<runId>], so work-store items and trigger items are
 //                    never the same Plane item — no metadata collision).
 //   - dates       -> native start_date/target_date (smoke-proven + asserted).
-//   - status+deps -> a FENCED, namespaced connector-owned metadata block in the
-//                    description ([cinatra-work-store] … [/cinatra-work-store]),
-//                    parsed back deterministically and asserted. (Abstract
+//   - status+deps -> a FENCED, namespaced connector-owned metadata block carried
+//                    in `description_html` ([cinatra-work-store] … [/cinatra-work-store]),
+//                    parsed back deterministically (HTML stripped to text) and
+//                    asserted. (Abstract
 //                    `status` is authoritative here; a native Plane board-state
 //                    projection is a W3 enhancement, once the /states/ endpoint is
 //                    smoke-proven — deferred so W1 correctness needs no /states/.)
@@ -145,14 +154,83 @@ type PlaneWorkItem = {
   name?: string;
   description_stripped?: string | null;
   description?: string | null;
+  description_html?: string | null;
   start_date?: string | null;
   target_date?: string | null;
   assignees?: string[] | null;
   updated_at?: string | null;
 };
 
+// LIVE-SMOKE-PROVEN (real Plane CE round-trip): Plane CE public API v1 persists
+// the rich-text `description_html` and returns NEITHER `description_stripped` NOR
+// `description` on read; a plain `description` sent on write is dropped. So the
+// connector's authoritative status/deps metadata block must ride in
+// `description_html` and be recovered by stripping that HTML back to plain text
+// (its sentinels are plain text inside <p>/<div>, so tag-stripping recovers them).
+// Deterministic + total.
+function stripHtmlToText(html: string | null | undefined): string {
+  if (!html) return "";
+  // Block-level tags -> a newline (so paragraph structure survives the strip).
+  let text = html.replace(/<\s*(br|\/p|\/div|\/li|\/h[1-6])\s*\/?\s*>/gi, "\n");
+  // Remove every remaining tag, repeating to a FIXPOINT. A single pass can be
+  // defeated by a nested/overlapping fragment (e.g. "<a<b>>") that re-forms a
+  // "<...>" after one removal; looping until the string stops changing removes
+  // them completely. (This is the standard remediation for incomplete
+  // multi-character sanitization; here the result is only parsed for the
+  // connector's plain-text metadata tokens and is never re-emitted as HTML.)
+  for (let prev = ""; prev !== text; ) {
+    prev = text;
+    text = text.replace(/<[^>]+>/g, "");
+  }
+  return text
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    // Decode &amp; LAST — it is the exact inverse of textToHtml, which escapes `&`
+    // first. Decoding it FIRST would double-decode literal user text: a body that
+    // literally contains "&lt;" is escaped on write to "&amp;lt;", and an
+    // amp-first pass would turn it back into "<". Amp-last makes textToHtml ->
+    // stripHtmlToText a faithful round-trip for `&`, `<`, `>` AND for entity-like
+    // literal text a caller may have typed.
+    .replace(/&amp;/gi, "&")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+/** Recover the connector's plain-text description. Prefer a NON-EMPTY
+ *  provider-plain field (some Plane builds still emit `description_stripped` /
+ *  `description`), else strip the rich-text `description_html` (real Plane CE
+ *  returns ONLY that). The plain field must be non-EMPTY, not merely non-null: an
+ *  empty-string `description_stripped`/`description` must NOT mask a populated
+ *  `description_html` (that would drop the authoritative status/deps block). */
+function readDescription(raw: PlaneWorkItem): string {
+  const plain = [raw.description_stripped, raw.description].find(
+    (v): v is string => typeof v === "string" && v.trim().length > 0,
+  );
+  return plain ?? stripHtmlToText(raw.description_html);
+}
+/** Wrap the connector's plain-text description as HTML Plane will persist AND
+ *  strip back cleanly: one <p> per SOURCE line, blank lines kept as empty
+ *  paragraphs (so the human body's paragraph breaks survive) and line content NOT
+ *  trimmed (so indentation survives). The fenced metadata block's own lines are
+ *  already whitespace-clean and non-empty, so their on-the-wire HTML is IDENTICAL
+ *  either way — only the human body gains fidelity, and the live-proven block
+ *  round-trip is unchanged. */
+function textToHtml(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const escaped = line
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped.length > 0 ? `<p>${escaped}</p>` : "<p></p>";
+    })
+    .join("");
+}
+
 type PlaneListResponse =
-  | { results?: PlaneWorkItem[]; next_cursor?: string | null; next?: string | null }
+  | { results?: PlaneWorkItem[]; next_cursor?: string | null; next?: string | null; next_page_results?: boolean }
   | PlaneWorkItem[];
 
 type PlaneComment = {
@@ -339,7 +417,7 @@ function naturalKeyFromName(name: string | undefined): string | null {
 // from the caller) so a dropped/altered marker is caught by read-after-write.
 function toWorkItem(raw: PlaneWorkItem): PmWorkItemLocal {
   const naturalKey = naturalKeyFromName(raw.name) ?? "";
-  const desc = raw.description_stripped ?? raw.description ?? "";
+  const desc = readDescription(raw);
   const blockText = extractMetaBlockText(desc);
   const status = (blockText && parseMetaStatus(blockText)) || "backlog";
   const dependsOn = blockText ? parseMetaDeps(blockText) : [];
@@ -374,7 +452,10 @@ function workItemWriteBody(
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     name: composeTitle(desired.title, desired.naturalKey),
-    description: composeDescription(desired.body, desired.status, desired.dependsOn ?? []),
+    // LIVE-SMOKE-PROVEN: write the rich-text field Plane CE actually persists.
+    description_html: textToHtml(
+      composeDescription(desired.body, desired.status, desired.dependsOn ?? []),
+    ),
   };
   if (calStart !== null) body.start_date = calStart;
   else if (opts.clearNulls) body.start_date = null;
@@ -457,6 +538,11 @@ async function listAllByMarker(markerSubstring: string): Promise<PlaneWorkItem[]
         out.push(w);
       }
     }
+    // LIVE-SMOKE-PROVEN fix: Plane CE returns a TRUTHY next_cursor even on the
+    // terminal/empty page (e.g. "100:1:0" with 0 results); its explicit
+    // next_page_results:false is the real terminator. Keying only off next_cursor
+    // truthiness over-paginates to the page cap / rate limit on every marker find.
+    if (!Array.isArray(list) && list?.next_page_results === false) break;
     const next = Array.isArray(list)
       ? null
       : (list?.next_cursor ?? cursorFromNextUrl(list?.next) ?? null);
@@ -579,7 +665,7 @@ async function readBackAndAssert(id: string, desired: PmWorkItemDraftLocal): Pro
   // Assert the authoritative metadata block physically survived BEFORE trusting
   // the (default-filling) map — otherwise a total block loss on a backlog/empty
   // -deps write would pass as a no-op-equal read-back.
-  assertMetaBlockPersisted(raw.description_stripped ?? raw.description ?? "", desired.naturalKey);
+  assertMetaBlockPersisted(readDescription(raw), desired.naturalKey);
   const landed = toWorkItem(raw);
   assertLanded(desired, landed);
   return landed;
