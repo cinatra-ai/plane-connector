@@ -7,5 +7,4 @@
 
 # Security-relevant paths — request the owner + the org review account.
 /.github/ @groganz @megajustice
-/package.json @groganz @megajustice
 /LICENSE @groganz @megajustice
