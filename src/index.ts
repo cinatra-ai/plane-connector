@@ -12,6 +12,24 @@ export { planeConnector } from "./plane-connector";
 export { planeWorkStore } from "./plane-work-store";
 export { registerPlaneConnectorPrimitives } from "./mcp/module";
 export type { PlaneInstanceConfig } from "./deps";
+// Headless prod auto-connect (#40): the in-connector replacement for the ops
+// first-run mint. `runPlaneAutoConnect` is the env-driven prod entry; the rest
+// are exported for tests + a direct-invocation path.
+export {
+  ensurePlaneTokenAttached,
+  runPlaneAutoConnect,
+  mintPlaneToken,
+  validatePlaneToken,
+  probePlaneVersion,
+  fingerprint,
+  SUPPORTED_PLANE_VERSIONS,
+  PlaneMintError,
+  type PlaneProvisionDeps,
+  type PlaneAutoConnectOptions,
+  type PlaneAutoConnectResult,
+  type PlaneAutoConnectStatus,
+  type PlaneValidation,
+} from "./plane-provision";
 
 /**
  * Boot-time entry point. Registers the Plane provider with the SDK PM provider
