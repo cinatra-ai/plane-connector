@@ -1,10 +1,12 @@
 name: docs-meta-commentary
 
 # Runs the reusable meta-commentary gate (cinatra-ai/ci) against this repo's
-# docs/ tree: fails a PR when a published, user-facing integration docs page
-# carries meta/implementation commentary about how the docs THEMSELVES are
-# produced — generation mechanics, "forthcoming"/placeholder transition notes,
-# editorial TODOs, and the like. Wires cinatra-ai/docs#119 into this repo.
+# published Markdown surfaces — the docs/ tree plus the top-level README.md:
+# fails a PR when a published, user-facing page carries meta/implementation
+# commentary about how the docs THEMSELVES are produced — generation mechanics,
+# "forthcoming"/placeholder transition notes, editorial TODOs, and the like.
+# Wires cinatra-ai/docs#119 into this repo, widened to the multi-path scan set
+# from cinatra-ai/docs#156 (README.md is published surface too).
 #
 # Structured like the sibling docs-contract-gate.yml caller: both the workflow
 # ref (`@<sha>`) and the `ref` input are pinned to the SAME cinatra-ai/ci commit
@@ -20,7 +22,9 @@ permissions:
 
 jobs:
   meta-commentary-gate:
-    uses: cinatra-ai/ci/.github/workflows/meta-commentary-gate.yml@efbefdbd13aada36b68bcef0c52d74a13f7c23f2 # v0.1.3
+    uses: cinatra-ai/ci/.github/workflows/meta-commentary-gate.yml@0a0152451b3a5bd80a47e728b38a46e65a2faa32 # v0.1.3-next.0a01524
     with:
-      docs: "docs"
-      ref: efbefdbd13aada36b68bcef0c52d74a13f7c23f2
+      paths: |
+        docs
+        README.md
+      ref: 0a0152451b3a5bd80a47e728b38a46e65a2faa32
