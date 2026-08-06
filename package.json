@@ -57,6 +57,7 @@
       "name": "Cinatra"
     },
     "displayName": "Plane",
+    "logo": "./cinatra/logo.svg",
     "dependencies": [],
     "serverEntry": "./register",
     "devSetup": "./src/dev-setup",
