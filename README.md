@@ -1,14 +1,16 @@
 # Plane
 
-Mirrors cinatra agent-run triggers into [Plane](https://plane.so) work items (project management). Configure with a Plane base URL, workspace slug, project id, and a user-level Plane API token (minted via **Profile → API Tokens** in Plane). The PAT is stored encrypted at rest. A Plane outage never breaks a trigger — the connector is fail-open.
+Mirrors cinatra agent-run triggers into [Plane](https://plane.so) work items (project management). Configure with a Plane base URL, workspace slug, project id, and a user-level Plane API token (minted via **Profile → API Tokens** in Plane). A Plane outage never breaks a trigger — the connector is fail-open.
 
 **Setup:** The connector requires a Plane base URL (e.g. `http://plane.example.com`), a workspace slug, a project id, and a user-level Plane API token (`plane_api_…`, minted in Plane under **Profile → API Tokens**). These are stored via the host connector-config store with the PAT encrypted at rest.
 
+**Headless auto-connect:** the application reads these for the connector's headless first-run connect: `CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_URL`, `CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_ADMIN_EMAIL` and `CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_ADMIN_PASSWORD` (required); `CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_WORKSPACE_NAME`, `CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_WORKSPACE_SLUG` and `CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_PROJECT_ID` (optional). The old unprefixed names are read only by the development setup hook.
+
 **Failure modes:** A missing or wrong token returns 401 (no header) or 403 (invalid key). A non-member workspace or unknown project id returns 403. Use `plane_status` (MCP) to probe the connection after setup.
 
-**Development:** `pnpm test` runs the Vitest suite; `node extension-kind-gate.mjs` validates the extension manifest and README locally before publishing.
+**Development:** `pnpm test` runs the Vitest suite; `node extension-kind-gate.mjs` validates the extension manifest and README locally.
 
-**Documentation:** the full integration hub lives at [docs.cinatra.ai/integrations/plane](https://docs.cinatra.ai/integrations/plane/) — overview, quick start, settings & permissions, and troubleshooting. The same pages are available in this repo under `docs/`.
+**Documentation:** the full integration hub lives at [docs.cinatra.ai/integrations/plane](https://docs.cinatra.ai/integrations/plane/). The same pages are in `docs/`.
 
 ## Works with
 
