@@ -65,6 +65,14 @@
       "capabilities"
     ],
     "sdkAbiRange": "^2",
-    "consumes": []
+    "consumes": [],
+    "envOverrides": {
+      "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_URL": "settings:baseUrl",
+      "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_ADMIN_EMAIL": "settings:adminEmail",
+      "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_ADMIN_PASSWORD": "secrets:adminPassword",
+      "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_WORKSPACE_NAME": "settings:workspaceName",
+      "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_WORKSPACE_SLUG": "settings:workspaceSlug",
+      "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_PROJECT_ID": "settings:projectId"
+    }
   }
 }

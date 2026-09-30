@@ -53,6 +53,8 @@ type HostConnectorConfigShape = {
   read<T>(connectorId: string, fallback: T): T;
   write(connectorId: string, value: unknown): void;
   delete(connectorId: string): void;
+  // Additive: the host resolves this package's manifest-declared env overrides.
+  resolveEnvOverrides?(packageName: string): Record<string, string>;
 };
 
 /** Lazy per-concern host-service resolution (fail-loud on a missing service —
@@ -87,6 +89,7 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): PlaneConnectorHostDeps {
     saveInstanceConfig: async (instance) => {
       config().write(INSTANCE_CONFIG_KEY, instance);
     },
+    resolveEnvOverrides: () => config().resolveEnvOverrides?.(PACKAGE_NAME) ?? {},
   };
 }
 
