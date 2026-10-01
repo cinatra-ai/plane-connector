@@ -5,7 +5,10 @@ const serverOnlyStub = path.join(__dirname, "tests/__stubs__/server-only.ts");
 
 export default defineConfig({
   resolve: {
-    alias: [{ find: "server-only", replacement: serverOnlyStub }],
+    alias: [
+      { find: "@cinatra-ai/design-primitives", replacement: path.join(__dirname, "src/__tests__/fixtures/design-primitives.tsx") },
+      { find: "server-only", replacement: serverOnlyStub },
+    ],
   },
   test: {
     environment: "node",
