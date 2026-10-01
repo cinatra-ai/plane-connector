@@ -2,11 +2,9 @@
 //
 // Admin-only. Shadcn primitives ONLY per the design discipline:
 //   - <ConnectorSetupPage> shell (header + Wide content column, sdk-ui)
-//   - <Tabs>/<TabsListRow>/<TabsTrigger>/<TabsContent> (sdk-ui, portable —
-//     bundled-react connectors ship their own React and cannot import the
-//     host app's `@/components/ui/tabs`; see cinatra-ai/cinatra#1103)
+//   - <Tabs>/<TabsListRow>/<TabsTrigger>/<TabsContent> shared by sdk-ui
 //   - <Card> chrome with <CardHeader><CardTitle><CardDescription/></CardHeader><CardContent>
-//   - <Input>/<Button> vendored primitives (components/ui) — never raw form controls
+//   - <Input>/<Button> primitives supplied by the host — never raw form controls
 //   - semantic tokens only (text-foreground, bg-surface, border-line, ...)
 //   - no emojis
 //
@@ -39,9 +37,9 @@ import {
   CardHeader,
   CardTitle,
   CardDescription,
-} from "./components/ui/card";
-import { Input } from "./components/ui/input";
-import { Button } from "./components/ui/button";
+  Input,
+  Button,
+} from "@cinatra-ai/design-primitives";
 import { connectPlaneAction } from "./actions";
 import { getPlaneDeps, type PlaneInstanceConfig } from "./deps";
 

@@ -23,8 +23,7 @@ import {
 } from "../deps";
 import { ConnectorSetupPage } from "@cinatra-ai/sdk-ui/connector-setup-page";
 import { Tabs, TabsListRow, TabsTrigger, TabsContent } from "@cinatra-ai/sdk-ui/tabs";
-import { Card } from "../components/ui/card";
-import { Input } from "../components/ui/input";
+import { Card, Input } from "@cinatra-ai/design-primitives";
 import { connectPlaneAction } from "../actions";
 
 const INSTANCE: PlaneInstanceConfig = {
