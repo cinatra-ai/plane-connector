@@ -64,6 +64,10 @@ export interface PlaneConnectorHostDeps {
   loadInstanceConfig: () => Promise<PlaneInstanceConfig | null>;
   /** Persist (upsert) the Plane instance config (encrypted PAT included). */
   saveInstanceConfig: (config: PlaneInstanceConfig) => Promise<void>;
+  /** The host resolves this package's manifest-declared environment overrides,
+   *  keyed by the auto-connect option names (baseUrl, adminEmail, ...). A host
+   *  without the member yields none. */
+  resolveEnvOverrides?: () => Record<string, string>;
 }
 
 const PLANE_DEPS_KEY = Symbol.for("@cinatra-ai/plane-connector:host-deps/v1");

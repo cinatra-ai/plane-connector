@@ -659,27 +659,50 @@ export async function ensurePlaneTokenAttached(
 }
 
 // ---------------------------------------------------------------------------
-// Env-driven headless entry (the prod invocation seam). Reads deployment-provided
-// admin credentials from the environment and resolves the host-bound deps slot —
-// the in-connector replacement for the ops first-run script. No host-contract
-// change: the deployment invokes this; the connector owns the mint logic.
+// Headless entry (the prod invocation seam). Reads the deployment's values
+// through the host's manifest-declared override road and resolves the host-bound
+// deps slot — the in-connector replacement for the ops first-run script. The
+// development hook passes its own record. No host-contract change: the
+// deployment invokes this; the connector owns the mint logic.
 // ---------------------------------------------------------------------------
 
+function readAutoConnectOverrides(): Record<string, string> {
+  try {
+    return getPlaneDeps().resolveEnvOverrides?.() ?? {};
+  } catch {
+    return {};
+  }
+}
+
 export async function runPlaneAutoConnect(
-  env: Record<string, string | undefined> = process.env,
+  env?: Record<string, string | undefined>,
   overrides?: Partial<PlaneProvisionDeps>,
 ): Promise<PlaneAutoConnectResult> {
-  const baseUrl = (env.PLANE_URL ?? "").trim();
-  const adminEmail = (env.PLANE_ADMIN_EMAIL ?? "").trim();
-  const adminPassword = env.PLANE_ADMIN_PASSWORD ?? "";
+  const values: Record<string, string | undefined> = env
+    ? {
+        baseUrl: env.PLANE_URL,
+        adminEmail: env.PLANE_ADMIN_EMAIL,
+        adminPassword: env.PLANE_ADMIN_PASSWORD,
+        workspaceName: env.PLANE_WORKSPACE_NAME,
+        workspaceSlug: env.PLANE_WORKSPACE_SLUG,
+        projectId: env.PLANE_PROJECT_ID,
+      }
+    : readAutoConnectOverrides();
+  const baseUrl = (values.baseUrl ?? "").trim();
+  const adminEmail = (values.adminEmail ?? "").trim();
+  const adminPassword = values.adminPassword ?? "";
   if (!baseUrl || !adminEmail || !adminPassword) {
     return {
       status: "skipped",
       connected: false,
       minted: false,
-      note:
-        "auto-connect env not set (PLANE_URL + PLANE_ADMIN_EMAIL + PLANE_ADMIN_PASSWORD). " +
-        "The manual-paste path in the connector setup page remains the fallback.",
+      note: env
+        ? "auto-connect env not set (PLANE_URL + PLANE_ADMIN_EMAIL + PLANE_ADMIN_PASSWORD). " +
+          "The manual-paste path in the connector setup page remains the fallback."
+        : "auto-connect overrides not set (CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_URL + " +
+          "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_ADMIN_EMAIL + " +
+          "CINATRA_EXT_CINATRA_HAI_SPLANE_HCONNECTOR__PLANE_ADMIN_PASSWORD). " +
+          "The manual-paste path in the connector setup page remains the fallback.",
     };
   }
   const hostDeps = getPlaneDeps();
@@ -694,8 +717,8 @@ export async function runPlaneAutoConnect(
     baseUrl,
     adminEmail,
     adminPassword,
-    workspaceName: env.PLANE_WORKSPACE_NAME?.trim() || undefined,
-    workspaceSlug: env.PLANE_WORKSPACE_SLUG?.trim() || undefined,
-    projectId: env.PLANE_PROJECT_ID?.trim() || undefined,
+    workspaceName: values.workspaceName?.trim() || undefined,
+    workspaceSlug: values.workspaceSlug?.trim() || undefined,
+    projectId: values.projectId?.trim() || undefined,
   });
 }
