@@ -1,7 +1,7 @@
 {
   "$comment": "Named, versioned machine-verification suite for cinatra-ai/plane-connector — the gate-arm half of the truthful verification-record model (the Truthful Attribution protocol §4). The truthful-attribution-gate reads THIS file at the merged SHA (authoritative, no TOCTOU) when a merge record carries a Gate-suite arm: the cited suiteId@version must equal this file's, the Accountable trailer must equal accountable{github,name,email}, and every requiredContexts entry must have concluded success on the reviewed head. requiredContexts names every check this repository's own workflows run on each pull request into main: each reusable gate with the reusable workflow it calls, the sha this repository's own caller pins for it, that caller's path and the events it runs on; each job of these workflows that calls no reusable workflow by its context alone, with no workflow/pinned pair; and the truthful-attribution-gate context, whose engine pin lives in its caller's uses: line (itself a high-risk path). A change that moves one of these caller pins moves the matching pinned value here in the same commit and bumps the version. highRiskPaths EXTENDS the central cinatra-ai/ci defaults (the gate verifies the effective set is a superset). High-risk changes (this file is itself one — see **/gate-suite.json) require the HUMAN arm at tier=maintainer or the maintainer's standing authority; the gate arm alone is rejected, so this file's birth never rests on a self-blessing gate arm. lastAuditedAt + auditEvidence are the §4 monthly-audit record; the Accountable engineer re-audits monthly and bumps BOTH coupled in one commit (the gate warns >35d, fails the gate arm >65d; the human arm is always still available).",
   "suiteId": "plane-connector-core",
-  "version": "2026.09.1",
+  "version": "2026.10.1",
   "accountable": {
     "name": "Sandro Groganz",
     "email": "sandro@cinatra.ai",
@@ -79,6 +79,16 @@
       "workflow": "cinatra-ai/ci/.github/workflows/ui-design-system-gate.yml",
       "pinned": "83ca29ef8df0a33d11ba02568c61f2fdc56a3eaf",
       "callerPath": ".github/workflows/ui-design-system-gate.yml",
+      "allowedEvents": [
+        "pull_request",
+        "push"
+      ]
+    },
+    {
+      "context": "extension-conformance-gate / extension-conformance-gate",
+      "workflow": "cinatra-ai/cinatra/.github/workflows/extension-conformance-gate-reusable.yml",
+      "pinned": "2cf48c6cfaabc6ba297de99d8fb495da6b5732f4",
+      "callerPath": ".github/workflows/extension-conformance-gate.yml",
       "allowedEvents": [
         "pull_request",
         "push"
